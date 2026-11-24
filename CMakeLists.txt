@@ -1,4 +1,4 @@
-﻿# Strata Engine - top-level build (P1.S1).
+# Strata Engine - top-level build (P1.S1).
 #
 # Targets (phase-1 Ă‚Â§P1.S1): `strata_artifact` (no CUDA dependency), `tests`.  `strata_plan` and the C++
 # `strata-pack` are added when their sources exist - a target with no sources would make the build graph
@@ -641,6 +641,15 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
   if(WIN32 AND STRATA_ENABLE_CUDA)
     target_link_libraries(strata_engine PRIVATE dxgi)
+  endif()
+  if(STRATA_CPU_ARM64 AND MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # Windows on arm64 builds C and C++ with Visual Studio's clang-cl (ggml-cpu refuses MSVC on ARM), and its -O2
+    # stops on these two files: once the block placement has moved a catch handler's cleanup out of the funclet,
+    # the address the handler hands the unwinder - a block of the function's own body - becomes
+    # "adrp x0, .LBB.. / add x0, x0, .LBB.." without the :lo12: page offset, and the assembler answers
+    # `assembler label '' can not be undefined`. /O1, which the file's own flags carry after the Release /O2,
+    # keeps that address where COFF can reach it; everything else here (and every CUDA source) assembles at -O2.
+    set_source_files_properties(src/core/layer.cpp src/core/verify.cpp PROPERTIES COMPILE_OPTIONS "/O1")
   endif()
   if(STRATA_BUILD_TESTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP))
     # the DFlash2 drafter against a CPU float forward of the same GGUF (glm_dflash_test <draft.gguf>; needs a GPU)

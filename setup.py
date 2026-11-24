@@ -431,6 +431,12 @@ def gpus():
             unified = integrated[key] if key in integrated else (key in umem and not reported)
             if not reported:
                 vram = ram_gb() if unified else 0.0
+            if not cc.replace(".", "").isdigit():
+                # (not a CUDA device: on a Windows-on-ARM PC with an NVIDIA Spark, nvidia-smi also lists the "NVIDIA
+                # NPU" beside the GPU, with compute_cap "[N/A]".  Everything downstream reads arch as a number
+                # (int(g["arch"]) >= 70 and friends), so a device without one is left out here - as the AMD list is
+                # (amd_gpus: `found if g["arch"]`); a card whose driver names no compute capability cannot run CUDA.)
+                continue
             found.append({"index": int(idx), "name": name, "vram_gb": vram, "arch": cc.replace(".", ""),
                           "driver": drv, "pci": bus, "unified_memory": unified})
         except ValueError:
@@ -477,8 +483,24 @@ def nvcc_takes_vs2026(nvcc):
     return v is not None and v >= VS2026_MIN_CUDA    # unknown toolkit: False, the same requirement as CUDA 12.x
 
 
+# Visual Studio's C++ tools component and environment script per architecture.  A Windows-on-ARM PC (a Snapdragon X
+# or NVIDIA Spark laptop) is built ARM64 there: CUDA's nvcc is an ARM64 program, the engine links ARM64 objects and
+# ggml-cpu takes its NEON paths, while vcvars64.bat puts the x64 compiler and the x64 clang-cl on PATH.  CMake then
+# compiles its C check for x64 and the ARM64 linker refuses it - "lld-link: error: ... machine type x64 conflicts
+# with arm64" - which shows up as the compiler test program not building at enable_language(C).
+VC_TOOLS = {"x64": ("Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "vcvars64.bat"),
+            "arm64": ("Microsoft.VisualStudio.Component.VC.Tools.ARM64", "vcvarsarm64.bat")}
+
+
+def vcvars_arch() -> str:
+    """The architecture to build for here: arm64 on Windows on ARM, x64 everywhere else."""
+    return "arm64" if ARM else "x64"
+
+
 def find_vcvars(cuda=True, nvcc=None):
-    """Visual Studio's vcvars64.bat for a build, newest first.
+    """Visual Studio's vcvars script for a build (vcvars64.bat on an x64 PC, vcvarsarm64.bat on Windows on ARM:
+    VC_TOOLS/vcvars_arch), newest first.  On ARM the PC's own architecture comes first and the x64 tools are the
+    fallback - a Build Tools install without the ARM64 component still builds there, under Windows' x64 emulation.
     CUDA (the default) asks for 2019/2022 only ([16,18)): a newer one (2026 = version 18) installed next to them
     must not be picked ("unsupported Microsoft Visual Studio version"), and with only a newer one there is none.
     Given `nvcc` of CUDA 13.2 or newer - the release whose install guide first supports VS 2026's toolset - 2026
@@ -491,13 +513,37 @@ def find_vcvars(cuda=True, nvcc=None):
     ranges = [["-version", "[16.0,18.0)"]]
     if not cuda or nvcc_takes_vs2026(nvcc):
         ranges.append(["-version", "[18.0,)"])
+    archs = ["arm64", "x64"] if vcvars_arch() == "arm64" else ["x64"]
     for versions in ranges:
-        p = out([str(vswhere), "-latest", "-prerelease", "-products", "*", *versions, "-requires",
-                 "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"]).strip()
-        v = Path(p) / "VC/Auxiliary/Build/vcvars64.bat" if p else None
-        if v and v.exists():
-            return v
+        for arch in archs:                       # (a VS instance is asked per component: the same version can have one and not the other)
+            component, script = VC_TOOLS[arch]
+            p = out([str(vswhere), "-latest", "-prerelease", "-products", "*", *versions, "-requires",
+                     component, "-property", "installationPath"]).strip()
+            v = Path(p) / "VC/Auxiliary/Build" / script if p else None
+            if v and v.exists():
+                return v
     return None
+
+
+# The arm64 build's C and C++ compiler: ggml's arm64 CPU backend refuses MSVC ("MSVC is not supported for ARM, use
+# clang", ggml-cpu/CMakeLists.txt), while CMake's own search inside Visual Studio's environment finds its cl.exe -
+# so on Windows on ARM the build names Visual Studio's own clang-cl: the LLVM of the "C++ Clang Compiler for
+# Windows" component, in the build's architecture (VC/Tools/Llvm/ARM64/bin there).
+CLANG_COMPONENT = "Microsoft.VisualStudio.Component.VC.Llvm.Clang"
+
+
+def find_clang_cl():
+    """Visual Studio's clang-cl for the build's architecture (VC_TOOLS/vcvars_arch), or None when no Visual Studio
+    with that C++ toolset has the clang component.  Only the arm64 build asks for it: an x64 Windows build takes
+    cl.exe, which every source here is written to compile with."""
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
+    if not vswhere.exists():
+        return None
+    arch = vcvars_arch()
+    p = out([str(vswhere), "-latest", "-prerelease", "-products", "*", "-requires", VC_TOOLS[arch][0],
+             "-requires", CLANG_COMPONENT, "-property", "installationPath"]).strip()
+    c = Path(p) / "VC/Tools/Llvm" / ("ARM64" if arch == "arm64" else "x64") / "bin/clang-cl.exe" if p else None
+    return c if c and c.exists() else None
 
 
 # ------------------------------------------------------------------------------------------------ downloads

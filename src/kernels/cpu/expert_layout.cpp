@@ -5,7 +5,9 @@
 
 #include <cstdio>
 #include <cstdlib>
-#if defined(_MSC_VER)
+#if defined(STRATA_X86) && defined(_MSC_VER)
+// (STRATA_X86, not _MSC_VER: clang-cl on Windows on ARM defines _MSC_VER too, and its <immintrin.h> stops with
+// "This header is only meant to be used on x86 and x64 architecture" - the probe below is the scalar one there)
 #include <intrin.h>
 #include <immintrin.h>
 #elif defined(STRATA_X86)

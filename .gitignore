@@ -63,3 +63,15 @@ build-vision.bat
 /data/hy4-cpu-lane.txt
 /data/hy4-cpu-lane.txt.new
 /data/vram-room.json
+
+# the drafting a PC measures for itself, and the id lists keyed off its tokenizer: this PC's numbers, and the setup
+# writes them again wherever it runs
+/data/*-drafting.txt
+/data/*-draft-ids-*.txt
+/data/*-measure-ids-*.txt
+
+# an editor's or a hand's backup of a file that is already in git
+*.bak
+
+# a release's own folder, unzipped inside the tree to copy it over an older one (the arm64 port's v1.1.74 drop)
+/project-maya-*/

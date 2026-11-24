@@ -1319,8 +1319,8 @@ VS2026_HIP_HINT = ("with Visual Studio 2026's Build Tools alone, ROCm 7.2's comp
 
 
 def vs_2026(vcvars) -> bool:
-    """Whether a vcvars64.bat is Visual Studio 2026's or newer (its folder is named by its major version, 18; 2019 and
-    2022 by their year)."""
+    """Whether a vcvars script (vcvars64.bat, vcvarsarm64.bat: S.VC_TOOLS) is Visual Studio 2026's or newer (its
+    folder is named by its major version, 18; 2019 and 2022 by their year)."""
     from pathlib import PureWindowsPath   # (a Windows path, read the same on any OS: the tests run on Linux too)
     return vcvars is not None and any(p.isdigit() and 18 <= int(p) < 1000 for p in PureWindowsPath(str(vcvars)).parts)
 
@@ -1601,7 +1601,7 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "", before=None) -
     `before`: the GPUs this model's config ran on - a setup again keeps them (the default answer; --gpus picks
     others)."""
     byid = {g["index"]: g for g in found}
-    usable = [g for g in found if int(g["arch"]) >= min_cc]
+    usable = [g for g in found if (int(g["arch"]) if str(g.get("arch")).isdigit() else 0) >= min_cc]
     kept = None if (a.gpus or a.gpu is not None) else \
         gpus_before(getattr(a, "gpus_before", None) if before is None else before, usable)
     if a.gpus or a.gpu is not None:
@@ -1761,8 +1761,8 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
             fail(why)
     say("  NVIDIA GPUs:")
     for g in found:
-        say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else
-                                       "can be used (Pascal: experimental)" if int(g["arch"]) >= min_cc else
+        say(f"    {gpu_label(g)} - " + ("can be used" if (int(g["arch"]) if str(g.get("arch", "")).isdigit() else 0) >= max(min_cc, VALIDATED_CC) else
+                                       "can be used (Pascal: experimental)" if (int(g["arch"]) if str(g.get("arch")).isdigit() else 0) >= min_cc else
                                        f"too old (this model needs compute capability {min_cc / 10:.1f} or newer)"))
     chosen = choose_gpus(a, found, min_cc, family)
     if ik2:                                            # (the cards picked: 8 GB or more; two: the larger first)
@@ -1770,7 +1770,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         if why:
             fail(why)
         chosen = sorted(chosen, key=lambda g: -float(g["vram_gb"] or 0))
-    archs = sorted({int(g["arch"]) for g in chosen})
+    archs = sorted({(int(g["arch"]) if str(g.get("arch")).isdigit() else 0) for g in chosen})
     vram = sum(g["vram_gb"] for g in chosen)
     ok("using " + " + ".join(gpu_label(g) for g in chosen) +
        ("" if len(chosen) < 2 else
@@ -2773,6 +2773,23 @@ def toolkit_root_defs(nvcc) -> list:
     return [] if root == Path("/usr") else [f"-DCUDAToolkit_ROOT={root}"]
 
 
+# What to say when the arm64 Windows build has no clang-cl to be configured with (clang_cl_defs).
+NO_CLANG_CL = ("looking for Visual Studio's clang-cl: ggml's arm64 CPU backend needs it (it refuses MSVC), and no "
+               "Visual Studio here has the \"C++ Clang Compiler for Windows\" component - add it in the Visual "
+               "Studio Installer (Individual components), then run ")
+
+
+def clang_cl_defs() -> list | None:
+    """CMAKE_C_COMPILER and CMAKE_CXX_COMPILER naming Visual Studio's clang-cl for the build.  Windows on arm64 is
+    built with it: CMake's own search in Visual Studio's environment finds its cl.exe, and the configure then stops
+    at ggml, whose arm64 CPU backend refuses MSVC ("MSVC is not supported for ARM, use clang" - S.find_clang_cl).
+    Every other PC, x64 Windows included, keeps the compiler CMake finds (cl.exe there).  None: not installed here."""
+    if not (WIN and S.ARM):
+        return []
+    c = S.find_clang_cl()
+    return None if c is None else [f"-DCMAKE_C_COMPILER={c.as_posix()}", f"-DCMAKE_CXX_COMPILER={c.as_posix()}"]
+
+
 def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, soft=False,
                    target: str = "maya", also=()) -> dict | None:
     """cmake configure + build of the `maya` target (DeepSeek: `maya-ds4`) in build/ - and of the targets in `also`
@@ -2812,6 +2829,10 @@ def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, s
              f"-DCMAKE_CUDA_COMPILER={nvcc}", *toolkit_root_defs(nvcc), f"-DSTRATA_GGML_DIR={llama}"]
     if S.ARM and S.arm_cpu_arch():
         conf.append(f"-DGGML_CPU_ARM_ARCH={S.arm_cpu_arch()}")
+    defs = clang_cl_defs()            # (Windows on arm64 names its C and C++ compiler there; everywhere else: [])
+    if defs is None:
+        return stop(NO_CLANG_CL + ME + " again")
+    conf += defs
     if host_compiler:
         conf.append(f"-DCMAKE_CUDA_HOST_COMPILER={shutil.which(host_compiler) or host_compiler}")
     # (CMake's compiler checks see only the chosen cards, numbered as nvidia-smi numbers them)
@@ -2877,9 +2898,10 @@ def vs_env(env=None) -> dict:
 
 def cmake_steps(conf, build, env, bat_name: str, vcvars=None, nvcc=None) -> str | None:
     """CMake's configure, then its build (once more when that stops: it continues where it stopped).  None when both
-    worked, else what stopped.  On Windows both run in a .bat that first calls Visual Studio's vcvars64.bat - the
-    compiler's environment - the way Strata's setup.py builds there (cmake_build).  `nvcc` says which toolkit the
-    CUDA build uses: its release decides whether a VS 2026-only PC is usable (S.find_vcvars)."""
+    worked, else what stopped.  On Windows both run in a .bat that first calls Visual Studio's vcvars script for the
+    build's architecture (S.find_vcvars) - the compiler's environment - the way Strata's setup.py builds there
+    (cmake_build).  `nvcc` says which toolkit the CUDA build uses: its release decides whether a VS 2026-only PC is
+    usable."""
     if not WIN:
         if run(conf, env=env, check=False).returncode != 0:
             return "configuring"
@@ -3259,7 +3281,7 @@ def mixed_builds(a, pc, llama: Path, target: str, quiet: bool = False) -> None:
     if not cards:
         return
     src = S.source_hash(S.ENGINE_SOURCES)
-    archs = sorted({int(g["arch"]) for g in cards})
+    archs = sorted({(int(g["arch"]) if str(g.get("arch")).isdigit() else 0) for g in cards})
     hip_meta = read_json(STAMP)
     helper = exe_for_target("maya-glm-helper")
     need_helper = target == "maya" and not (helper.exists() and hip_meta.get("src") == src and
@@ -4451,6 +4473,10 @@ def compile_vision(pc, meta, llama: Path, src: str) -> bool:
                  *toolkit_root_defs(meta.get('nvcc') or pc['nvcc'])]
         if S.ARM and S.arm_cpu_arch():
             conf.append(f"-DGGML_CPU_ARM_ARCH={S.arm_cpu_arch()}")
+        defs = clang_cl_defs()        # (the same ggml as in the engine: Windows on arm64 builds it with clang-cl)
+        if defs is None:
+            fail(NO_CLANG_CL + ME + " again")   # (no stop here: compile_vision reports by returning False)
+        conf += defs
     if meta.get("host_compiler") and not metal and not hip:
         conf.append(f"-DCMAKE_CUDA_HOST_COMPILER={shutil.which(meta['host_compiler']) or meta['host_compiler']}")
     jobs = max(2, min((os.cpu_count() or 4) // 2, int(mem_gb()[0] // 4) or 2))
@@ -7675,7 +7701,7 @@ def choose_ds4_quant(a, prev: dict) -> str:
     # there) - a PC whose NVIDIA GPUs are all older is not offered them (nvidia-smi silent: offered, the
     # PC check says)
     try:
-        ccs = [] if hip else [int(g["arch"]) for g in S.gpus()]
+        ccs = [] if hip else [(int(g["arch"]) if str(g.get("arch")).isdigit() else 0) for g in S.gpus()]
     except Exception:  # noqa: BLE001 - no NVIDIA tools
         ccs = []
     exl3_ok = hip or not ccs or max(ccs) >= DS4_MIN_CC
