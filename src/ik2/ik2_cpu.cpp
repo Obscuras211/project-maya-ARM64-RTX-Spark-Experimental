@@ -1,7 +1,7 @@
 // src/ik2/ik2_cpu.cpp - maya-ik2's CPU lane (the interface: ik2_cpu.hpp).
 #include "ik2_cpu.hpp"
 
-#include "strata/platform/cpu_relax.hpp"   // (the spin hint: immintrin.h below is x86-only)
+#include "maya/platform/cpu_relax.hpp"   // (the spin hint: immintrin.h below is x86-only)
 
 #if defined(__x86_64__) || defined(_M_X64)
 // (not `#ifdef _MSC_VER`: clang-cl on Windows on ARM defines it, and its <immintrin.h> stops with "This header is
@@ -39,7 +39,7 @@ Pool::Pool(int n) {
                             break;
                         }
                         lk.unlock();
-                        strata_cpu_pause();
+                        maya_cpu_pause();
                     }
                     if (stop_ && q_.empty()) return;
                     f = std::move(q_.front());
@@ -75,7 +75,7 @@ void Pool::wait() {
         lk.lock();
         if (pending_ == 0) return;
         lk.unlock();
-        strata_cpu_pause();
+        maya_cpu_pause();
     }
     lk.lock();
     done_.wait(lk, [this]() { return pending_ == 0; });

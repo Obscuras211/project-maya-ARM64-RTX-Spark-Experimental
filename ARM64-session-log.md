@@ -158,8 +158,113 @@ measures for itself (`data/hy4-drafting.txt`, `data/ik2-drafting.txt`, the `*-id
 3. Two failure signatures to recognise instantly: an empty model list or "no NVIDIA GPU found" is the `nvidia-smi`
    NPU probe (`python -c "import setup as S; print(S.gpus())"` should print one row with a numeric `arch`); an
    executable that vanishes with `-1073741515` is a missing DLL (`dumpbin /dependents`).
-4. To move the port onto a newer upstream release: `git switch -c arm64-on-1177 v1.1.77` then
-   `git cherry-pick windows-arm64`, rebuild, and re-run the audit above.
+4. To move the port onto a newer upstream release: branch from the new tag and port by hand.  A `cherry-pick`
+   applies five of the eight files *cleanly* and the build then dies, because v1.1.81 renamed `include/strata`
+   to `include/maya` and `STRATA_*` to `MAYA_*` - section 0 of ARM64-changes.md is that audit, and the port of
+   1.1.74 to 1.1.81 is what it was written from.  Rebuild, then re-run the audit above.
 5. Hardware ceilings measured here, for calibration: 30.4 GB of system RAM, 185 GB of free disk, one GPU with no
    second device worth counting.  Families that need more than that are out of reach for reasons that have nothing to
    do with ARM.
+
+## A second account, and the one failure that was not in the code
+
+The port was proven on one laptop.  Then a second Windows account on the *same* machine - a fresh profile, a
+fresh clone of the fork, the same Visual Studio, the same CUDA - failed the build with about four hundred lines
+of
+
+    immintrin.h(14,2): error: "This header is only meant to be used on x86 and x64 architecture"
+
+in `expert.cpp`, `q2_avx512.cpp`, `iq_avx512.cpp`, `kq_avx512.cpp` and `iq_avx2.cpp`, plus
+`use of undeclared identifier 'kGemmK'` in `exl3_cpu.cpp`.  Every one of those files is something an ARM build
+never compiles.  Nothing in the repo differed between the two accounts.
+
+**Wrong turns.**  The errors name intrinsics and CUDA-adjacent files, so it reads as a missing Visual Studio
+component or a CUDA install problem.  Neither: the identical machine built the whole thing in the first
+account.  An ARM64 Windows runs an x64 program fine, so nothing looks wrong on the surface either - and the
+setup's own PC check passes, because it checks GPUs, RAM and Visual Studio, not the bitness of its own
+interpreter.
+
+**What it was.**  CMake decides the CPU family from the architecture of *cmake.exe itself*, and Maya's setup
+installs CMake with pip into `.venv` - so the tools inherit the bitness of the Python that installed them.
+The second account had an **x64 Python 3.12**, which Windows on ARM runs under emulation:
+
+    x64 Python  ->  x64 cmake.exe  ->  CMAKE_SYSTEM_PROCESSOR: AMD64  ->  GGML_SYSTEM_ARCH: x86
+                ->  ggml adds its AVX-512 and AVX2 kernel files  ->  ARM clang-cl cannot compile them
+
+Setting `PROCESSOR_ARCHITECTURE=ARM64` in the environment does **not** help: tested with CMake 4.4.5, it
+reports ARM64 from the variable and still picks x86, because its own binary is x64.
+
+**Read these two lines first in any build log of this repo** - they answer the question before the errors
+start:
+
+    -- CMAKE_SYSTEM_PROCESSOR: ARM64
+    -- GGML_SYSTEM_ARCH: ARM
+
+`x86` in the second line on an ARM PC means the tooling is the wrong bitness, and no change to the source will
+fix it.
+
+**The fix**, which is what the second account did: install Python's ARM64 build (3.12 or newer; python.org's
+downloads list it as "Windows installer (ARM64)"), delete `.venv` **and** `build`, make the environment again
+with the ARM64 interpreter, and check before configuring:
+
+    py -3.14-arm64 -m venv .venv
+    .venv\Scripts\python.exe -c "import platform; print(platform.machine())"      -> ARM64
+
+`build` has to go with it: the `CMakeFiles` cache holds the x86 decision, and a reconfigure keeps it.
+
+**What is in the code now because of it.**  Step 1 asks the question that account had to guess at, before it
+asks anything else or downloads a byte.  `setup.x64_on_arm64()` reads the PE header of the interpreter running
+the setup - emulation hides every softer answer, and `platform.machine()` answers `ARM64` even to an x64
+process, which is why upstream's own `ARM` flag is `True` in the broken case too - and step 1 stops with the
+error line, the reason and the command that undoes it.  `IsWow64Process2` is the call that tells the truth: it
+names both the process's machine and the host's.
+
+
+## The Update button, and why it could not point at us
+
+About > Updates had nagged for months about releases this PC cannot run, and the install's own log had the reason in
+a line that meant nothing until it was read next to the code:
+
+    [maya] the update did not happen: git fetch failed: ... and the repository exists.
+
+`serve/update.py` asks GitHub for the latest release of *the repository git calls `origin`*. This folder has no
+`origin` - the remotes are named `fork` and `upstream` - so the code fell back to its hard-coded
+`mw00/project-maya`: every check described a build that cannot compile here, and the click then died at the fetch
+before any of that could matter. `git remote add origin https://github.com/Obscuras211/project-maya.git` is the
+whole of that half of the fix, and it is worth checking on any folder that misbehaves: `git remote get-url origin`.
+
+Two quieter blockers were waiting behind it, both about a tag carrying a suffix:
+
+* `TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")` - to that pattern `v1.1.81-arm64` is not a version at all, and the
+  page answered "the latest release's tag is not a version". The regex now takes an optional suffix and `vtuple`
+  reads only the three numbers, which keeps the ordering honest: a build of 1.1.81 is never offered as "newer" to a
+  folder already running 1.1.81, so between ports the page stays quiet instead of nagging.
+* The update itself is `git merge --ff-only refs/tags/<tag>`, which moves only a folder standing *behind* the tag on
+  the same line of history. A port branch cut fresh from upstream `v1.1.81` is not behind the previous ARM release,
+  it is a different line, so the button would have found a dead end even with a perfectly readable tag.
+
+So the release is a merge commit, built after the build was verified, out of the tree that was compiled and run:
+
+    $tree = git rev-parse windows-arm64-1181^{tree}    # the tested tree, engines and all
+    $p1   = git rev-parse windows-arm64                # where a v1.1.74-arm64 install stands
+    $p2   = git rev-parse windows-arm64-1181           # the port, on top of upstream v1.1.81
+    git commit-tree $tree -p $p1 -p $p2 -m "Upstream v1.1.81, ported to Windows on ARM64"
+
+and the proof is short because the button is short: clone the folder, stand at the old release, run the page's two
+commands - `git fetch --tags origin`, `git merge --ff-only refs/tags/v1.1.81-arm64` - in the throwaway copy. It
+fast-forwards, the tree equals the built one, `VERSION` reads 1.1.81 and `git status` is clean. A Windows trap while
+checking any of this: `git merge-base --is-ancestor` is silent and answers through its exit code, so
+`if (git merge-base --is-ancestor A B)` in PowerShell is *always* false - read `$LASTEXITCODE`.
+
+The ported build did run, too: Inkling 2 Mini, 4,388 tokens in 66 s (76 tok/s) at 32K context, against 45 tok/s at
+262K on the v1.1.74 build. Those two numbers are the context sizes talking, not the port; a fair comparison sets
+both the same.
+
+One small thing that looked like a build failure and was not: deleting `.venv` from a folder that already has
+`build/` and `build-vision/` leaves those caches pointing at a cmake and ninja that no longer exist, and the next
+configure dies in two seconds with
+
+    CMake Error: CMake was unable to find a build program corresponding to "Ninja".  CMAKE_MAKE_PROGRAM is not set.
+
+Maya sees it, clears the cache and builds the whole thing, so the run goes on and finishes - but "delete `.venv` and
+try again" always means deleting the build folders with it.

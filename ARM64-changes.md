@@ -10,6 +10,73 @@ Compared with the upstream tag itself: `git diff --stat v1.1.74` is 8 files (sec
 [ARM64-session-log.md](ARM64-session-log.md) is the other half: how each of these was found, the error strings to
 recognise, the wrong turns, and the checks that settled each question.
 
+## 0. Carried onto upstream v1.1.81 (2026-11-25)
+
+This branch (`windows-arm64-1181`, tagged `v1.1.81-arm64`) is the same eight changes on upstream **v1.1.81** -
+165 commits and 868 files later.  The first release, `v1.1.74-arm64`, stays exactly as it was released; every
+section below still describes the port, and this one says what the move showed.  For this port the
+interesting part of the new release is what it did *not* do.
+
+**Upstream's ARM64 is not Windows on ARM.**  `_M_ARM64` - the macro every Microsoft compiler on ARM defines -
+appears in no file of v1.1.81, and the one aarch64 path in `cpu_relax.hpp` is GCC inline asm, which `cl.exe`
+cannot parse.  The ARM64 support that landed is for Linux on aarch64 (its own comment names a GB10 and reads
+the kernel's HWCAP list) and for Macs; `setup.py`'s new `ARM =` flag is used under `if ARM and not WIN:`.  So
+this branch is still the only thing that builds on Windows on ARM, and a future re-port should assume the same.
+
+**What moved, and what did not:**
+
+| the port's fix | upstream v1.1.81 | this branch |
+|---|---|---|
+| vision's `GGML_OPENMP OFF` (the missing `libomp140.aarch64.dll`) | **only half** - v1.1.81 turns OpenMP off inside its *x86 portable* branch; the non-x86 branch it added beside it leaves it on | kept: the `if(WIN32)` inside that non-x86 branch, which is where an ARM build lands |
+| the `nvidia-smi` NPU row (`compute_cap` `[N/A]`) | **half fixed** - `gpus()` no longer crashes (it keeps `arch` a string and catches the `[N/A]` memory), but it still hands the NPU back as a GPU | kept: the filter that leaves it out is what makes `gpus()` answer one device here instead of two |
+| clang-cl for ggml's ARM CPU backend | not touched: `find_vcvars` still looks only for `vcvars64.bat` | kept, and still most of the port |
+| `ds4_pool.hpp`'s spin hint | not touched: still `#if defined(_MSC_VER)` -> `_mm_pause()` | kept |
+| `ik2_cpu.cpp`, `ik2_lane.cpp` x86 intrinsics | not touched: `<immintrin.h>` still behind a bare `_MSC_VER` | kept |
+| `expert_layout.cpp`, the same trap | not touched: still `#if defined(_MSC_VER)` around `<immintrin.h>` | kept |
+| `/O1` for the two COFF-funclet files | the file around them was rewritten (1,078 lines) | re-inserted by hand, not replayed |
+
+**Names moved**, which is what turned a cherry-pick into a hand merge.  `git cherry-pick` (or `git apply -3`) of
+the old commit applies five of the eight files *cleanly* and the build then dies, because the hunks it carries
+refer to names v1.1.81 deleted:
+
+| v1.1.74 | v1.1.81 |
+|---|---|
+| `include/strata/...` | `include/maya/...` - the whole tree |
+| `STRATA_CPU_ARM64`, `STRATA_X86` | `MAYA_CPU_ARM64`, `MAYA_X86` |
+| `strata_cpu_pause()` | `maya_cpu_pause()` |
+
+After that the port is the same eight files as before, nothing added to them and nothing dropped.  The only files
+this branch adds are three the old one never had - `serve/update.py`, `serve/test_update.py` and
+`serve/web/settings.js` - and those are about *updating* a running install, not about building it.
+
+**New here: step 1 checks the Python's own architecture.**  An x64 Python running under emulation makes pip
+install an x64 CMake into `.venv`, CMake decides the CPU family from its own bitness, and the build is then
+told this is an x86 machine - a hundred files of `immintrin.h` errors, none of which mention Python.
+`setup.x64_on_arm64()` reads the PE header of the interpreter running the setup (emulation hides every softer
+answer: `platform.machine()` reports `ARM64` even to an x64 process, so upstream's `ARM` flag is `True` in the
+broken case too) and step 1 stops with the error line and the fix *before* it asks a question or downloads a
+byte.  The last section of [ARM64-session-log.md](ARM64-session-log.md) is how that was found.
+
+**The updater knows a fork's build is a build.**  `serve/update.py` could not read a tag like `v1.1.81-arm64` at
+all - its version regex is `^v?(\d+)\.(\d+)\.(\d+)$` - so About > Updates answered "the latest release's tag is not
+a version" and a folder on a build had no way forward from the page.  It now parses the suffix, orders releases by
+version alone (a build of 1.1.81 is never offered to a folder already running 1.1.81, so it cannot nag),
+fast-forwards to the build's own tag, and names that tag in the steps it hands you when it can't act itself.  A
+folder that updates from a fork also asks upstream, and while upstream is ahead of the newest build the page says
+so instead of calling the older build up to date in silence.  `serve/test_update.py` covers all of it, including a
+suffixed tag moving a real clone.
+
+**A release on this branch is a merge commit, and that is what keeps the Update button alive.**  The updater moves a
+folder with `git merge --ff-only refs/tags/<tag>`, which works only when that tag sits *ahead* of where the folder
+stands.  So `v1.1.81-arm64` has two parents - the tip of the ARM branch, `v1.1.74-arm64` and everything after it,
+and the port on top of upstream `v1.1.81` - with a tree equal to the one built and tested here.  A tidy branch cut
+fresh from upstream would have been a dead end for anyone updating from the previous release.  Every later re-port
+does the same, in this order: port on top of the new upstream tag and verify the build, then
+`git commit-tree <that tree> -p <branch tip> -p <the port>`, then tag the merge.  What must never happen is a
+release that is not a descendant of the release before it.  For the same reason one line went *back* to the
+`windows-arm64` branch: `v1.1.74-arm64`'s updater could not read a suffixed tag either, so it could not have
+offered this release from its own page.
+
 ## 1. The PC this was built and measured on
 
 | | |

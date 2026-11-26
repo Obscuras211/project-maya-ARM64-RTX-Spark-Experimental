@@ -5,9 +5,9 @@
 #include "hy4_lane.hpp"
 #include "ik2_exact.h"
 #include "ik2_off.cuh"
-#include "strata/kernels/cpu/pool.hpp"
+#include "maya/kernels/cpu/pool.hpp"
 
-#include "strata/platform/cpu_relax.hpp"   // (the spin hint, per architecture: _mm_pause on x86, yield on aarch64)
+#include "maya/platform/cpu_relax.hpp"   // (the spin hint, per architecture: _mm_pause on x86, yield on aarch64)
 
 #if defined(__x86_64__) || defined(_M_X64)
 // (Windows on arm64 builds this with clang-cl, whose <immintrin.h> refuses ARM: there the lane runs ik2_exact.h's
@@ -338,7 +338,7 @@ void Server::loop() {
         //  then nap, longer once idle for a second)
         const double idle = std::chrono::duration<double>(std::chrono::steady_clock::now() - idle_since).count();
         if (idle < 0.02) {
-            strata_cpu_pause();
+            maya_cpu_pause();
         } else {
             std::this_thread::sleep_for(std::chrono::microseconds(idle < 1.0 ? 50 : 500));
         }
