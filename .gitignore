@@ -76,3 +76,15 @@ build-vision.bat
 /maya-nightly-*.log
 /maya-nightly-*.tokens.json
 /data/golden/
+
+# the drafting a PC measures for itself, and the id lists keyed off its tokenizer: this PC's numbers, and the
+# setup writes them again wherever it runs
+/data/*-drafting.txt
+/data/*-draft-ids-*.txt
+/data/*-measure-ids-*.txt
+
+# an editor's or a hand's backup of a file that is already in git
+*.bak
+
+# a release's own folder, unzipped inside the tree to copy it over an older one
+/project-maya-*/

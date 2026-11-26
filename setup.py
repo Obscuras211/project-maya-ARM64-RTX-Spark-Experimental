@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import re
+import struct
 import shutil
 import struct
 import subprocess
@@ -26,6 +27,67 @@ ROOT = Path(__file__).resolve().parent
 WIN = os.name == "nt"
 ARM = platform.machine().lower() in ("aarch64", "arm64")
 PPC = platform.machine().lower() in ("ppc64le", "ppc64")   # AC922 POWER9: no AVX, ggml-cpu VSX
+# The machine's own architecture, which is not what a process on Windows on ARM is told.  An x64 Python there
+# runs under emulation, and platform.machine() answers "ARM64" for it too - while everything pip installs into
+# .venv is x64, CMake above all.  An x64 CMake is itself x64, so it reports the CPU as AMD64, ggml picks its
+# x86 family and builds AVX-512 and AVX2 kernels for a CPU that has neither, and the compile stops in a
+# hundred files with one line:  immintrin.h(14,2): error: "This header is only meant to be used on x86 and x64
+# architecture".  Nothing here is wrong with Visual Studio, CUDA or the source: it is one install mistake, and
+# it is worth saying so before a download.  maya.py's step 1 asks (x64_on_arm64).
+X64_MACHINE, ARM64_MACHINE = 0x8664, 0xAA64      # (a PE file's Machine field: IMAGE_FILE_MACHINE_*)
+
+
+def pe_machine(path) -> int | None:
+    """The Machine field of a PE file's COFF header, where an ARM64 build and an x64 build of the same program
+    differ and emulation cannot hide it.  None when the file is not a PE, or cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4096)
+        pe = struct.unpack_from("<I", head, 60)[0]              # (e_lfanew: where the PE header starts)
+        return struct.unpack_from("<H", head, pe + 4)[0] if head[pe:pe + 4] == b"PE\0\0" else None
+    except (OSError, ValueError, struct.error):
+        return None
+
+
+def arm64_host() -> bool:
+    """Whether this is a Windows on ARM PC - also when the question comes from an x64 process running under
+    emulation, where kernel32's IsWow64Process2 still names the machine and platform.machine() does not."""
+    if not WIN:
+        return False
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        fn = k32.IsWow64Process2          # (Windows 10 2004 and newer: it names BOTH the process's machine
+        fn.restype = ctypes.c_bool        #  and the host's, which is the one question emulation answers
+        fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_uint16)]
+        proc, host = ctypes.c_uint16(), ctypes.c_uint16()      # (a native process is answered 0 there)
+        if fn(k32.GetCurrentProcess(), ctypes.byref(proc), ctypes.byref(host)):
+            return host.value == ARM64_MACHINE
+    except (AttributeError, OSError, ctypes.Error):
+        pass                                        # (Windows older than 10 2004 has no IsWow64Process2)
+    return ARM                                      # (the best answer left: the one emulation does hide)
+
+
+def x64_on_arm64() -> str | None:
+    """This Python's path when it is an x64 build on a Windows on ARM PC, else None.  Asked after maya.py has
+    re-executed into .venv, so what it names is the interpreter that will build here - not whichever one the
+    .bat happened to start, which may already have handed the work over."""
+    if not (WIN and arm64_host()):
+        return None
+    return sys.executable if pe_machine(sys.executable) == X64_MACHINE else None
+
+
+# What step 1 says when that happens (maya.check_pc): the error they will see if they don't, and the fix.
+X64_ON_ARM64 = (
+    "this Python is an x64 build, running under emulation on this ARM64 PC\n"
+    "    {py}\n"
+    "    It makes pip install an x64 CMake into .venv, and an x64 CMake tells the build the CPU is x86, so the\n"
+    "    compile stops in a hundred files with one error:\n"
+    '        immintrin.h(14,2): error: "This header is only meant to be used on x86 and x64 architecture"\n'
+    "    Visual Studio, CUDA and the source are fine.  Install the ARM64 build of Python 3.12 or newer\n"
+    '    (python.org\'s downloads: "Windows installer (ARM64)"), delete .venv and build, and start the setup\n'
+    "    with it - an x64 .venv cannot be repaired in place, it has to be made again:\n"
+    "        py -3.14-arm64 -m venv .venv")
 LLAMA_CPP_COMMIT = "3cf03257f219afbe7334045ff7c6a06ac68c627d"
 LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMIT}.zip"
 
@@ -539,6 +601,12 @@ def gpus():
             unified = integrated[key] if key in integrated else (key in umem and not reported)
             if not reported:
                 vram = ram_gb() if unified else 0.0
+            if not cc.replace(".", "").isdigit():
+                # (not a CUDA device: on a Windows-on-ARM PC with an NVIDIA Spark, nvidia-smi also lists the "NVIDIA
+                # NPU" beside the GPU, with compute_cap "[N/A]".  Everything downstream reads arch as a number
+                # (int(g["arch"]) >= 70 and friends), so a device without one is left out here - as the AMD list is
+                # (amd_gpus: `found if g["arch"]`); a card whose driver names no compute capability cannot run CUDA.)
+                continue
             found.append({"index": int(idx), "name": name, "vram_gb": vram, "arch": cc.replace(".", ""),
                           "driver": drv, "pci": bus, "unified_memory": unified})
         except ValueError:
@@ -585,8 +653,24 @@ def nvcc_takes_vs2026(nvcc):
     return v is not None and v >= VS2026_MIN_CUDA    # unknown toolkit: False, the same requirement as CUDA 12.x
 
 
+# Visual Studio's C++ tools component and environment script per architecture.  A Windows-on-ARM PC (a Snapdragon X
+# or NVIDIA Spark laptop) is built ARM64 there: CUDA's nvcc is an ARM64 program, the engine links ARM64 objects and
+# ggml-cpu takes its NEON paths, while vcvars64.bat puts the x64 compiler and the x64 clang-cl on PATH.  CMake then
+# compiles its C check for x64 and the ARM64 linker refuses it - "lld-link: error: ... machine type x64 conflicts
+# with arm64" - which shows up as the compiler test program not building at enable_language(C).
+VC_TOOLS = {"x64": ("Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "vcvars64.bat"),
+            "arm64": ("Microsoft.VisualStudio.Component.VC.Tools.ARM64", "vcvarsarm64.bat")}
+
+
+def vcvars_arch() -> str:
+    """The architecture to build for here: arm64 on Windows on ARM, x64 everywhere else."""
+    return "arm64" if ARM else "x64"
+
+
 def find_vcvars(cuda=True, nvcc=None):
-    """Visual Studio's vcvars64.bat for a build, newest first.
+    """Visual Studio's vcvars script for a build (vcvars64.bat on an x64 PC, vcvarsarm64.bat on Windows on ARM:
+    VC_TOOLS/vcvars_arch), newest first.  On ARM the PC's own architecture comes first and the x64 tools are the
+    fallback - a Build Tools install without the ARM64 component still builds there, under Windows' x64 emulation.
     CUDA (the default) asks for 2019/2022 only ([16,18)): a newer one (2026 = version 18) installed next to them
     must not be picked ("unsupported Microsoft Visual Studio version"), and with only a newer one there is none.
     Given `nvcc` of CUDA 13.2 or newer - the release whose install guide first supports VS 2026's toolset - 2026
@@ -603,12 +687,15 @@ def find_vcvars(cuda=True, nvcc=None):
     ranges = [["-version", "[16.0,18.0)"]]
     if not cuda or nvcc_takes_vs2026(nvcc):
         ranges.append(["-version", "[18.0,)"])
+    archs = ["arm64", "x64"] if vcvars_arch() == "arm64" else ["x64"]
     for versions in ranges:
-        p = out([str(vswhere), "-latest", "-prerelease", "-products", "*", *versions, "-requires",
-                 "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"]).strip()
-        v = Path(p) / "VC/Auxiliary/Build/vcvars64.bat" if p else None
-        if v and v.exists():
-            return v
+        for arch in archs:                       # (a VS instance is asked per component: the same version can have one and not the other)
+            component, script = VC_TOOLS[arch]
+            p = out([str(vswhere), "-latest", "-prerelease", "-products", "*", *versions, "-requires",
+                     component, "-property", "installationPath"]).strip()
+            v = Path(p) / "VC/Auxiliary/Build" / script if p else None
+            if v and v.exists():
+                return v
     return None
 
 
@@ -651,6 +738,25 @@ def vcvars_args(vcvars, nvcc) -> tuple[str, str | None]:
     return "", (f"MSVC {bad} crashes CUDA {v[0]}.{v[1]}'s compiler (cudafe++ 0xC0000005) and no older toolset is "
                 "installed: in the Visual Studio Installer add the 'MSVC v143 - VS 2022 C++ x64/x86 build tools' "
                 "component (toolset 14.44), then run this again")
+# The arm64 build's C and C++ compiler: ggml's arm64 CPU backend refuses MSVC ("MSVC is not supported for ARM, use
+# clang", ggml-cpu/CMakeLists.txt), while CMake's own search inside Visual Studio's environment finds its cl.exe -
+# so on Windows on ARM the build names Visual Studio's own clang-cl: the LLVM of the "C++ Clang Compiler for
+# Windows" component, in the build's architecture (VC/Tools/Llvm/ARM64/bin there).
+CLANG_COMPONENT = "Microsoft.VisualStudio.Component.VC.Llvm.Clang"
+
+
+def find_clang_cl():
+    """Visual Studio's clang-cl for the build's architecture (VC_TOOLS/vcvars_arch), or None when no Visual Studio
+    with that C++ toolset has the clang component.  Only the arm64 build asks for it: an x64 Windows build takes
+    cl.exe, which every source here is written to compile with."""
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
+    if not vswhere.exists():
+        return None
+    arch = vcvars_arch()
+    p = out([str(vswhere), "-latest", "-prerelease", "-products", "*", "-requires", VC_TOOLS[arch][0],
+             "-requires", CLANG_COMPONENT, "-property", "installationPath"]).strip()
+    c = Path(p) / "VC/Tools/Llvm" / ("ARM64" if arch == "arm64" else "x64") / "bin/clang-cl.exe" if p else None
+    return c if c and c.exists() else None
 
 
 # ------------------------------------------------------------------------------------------------ downloads

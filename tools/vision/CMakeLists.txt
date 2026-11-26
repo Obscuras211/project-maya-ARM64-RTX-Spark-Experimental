@@ -42,6 +42,16 @@ else()
   if(NOT GGML_CPU_ARM_ARCH)
     set(GGML_CPU_ARM_ARCH "armv8.6-a+dotprod+i8mm+fp16" CACHE STRING "ggml-cpu ARM arch flags" FORCE)
   endif()
+  if(WIN32)
+    # Windows on arm64 builds C and C++ with Visual Studio's clang-cl (ggml-cpu refuses MSVC on ARM), and clang-cl's
+    # OpenMP is LLVM's own runtime: libomp140.aarch64.dll, which lives only inside the Visual Studio install
+    # (VC\Redist\MSVC\<ver>\debug_nonredist\arm64\Microsoft.VC143.OpenMP.LLVM) and never on the PATH of a plain
+    # session.  maya-vision.exe then ends before printing READY with 0xC0000135, a DLL was not found, which the
+    # server sees as "the vision encoder did not start" (serve/server.py, Vision._start).  The x86 build above asks
+    # MSVC's /openmp, whose vcomp140.dll Windows ships itself; the engine's ggml is built without OpenMP too (the
+    # top-level CMakeLists' GGML_OPENMP OFF), so a CPU encode costs the same threads here either way.
+    set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+  endif()
 endif()
 set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA ${MAYA_VISION_CUDA} CACHE BOOL "" FORCE)

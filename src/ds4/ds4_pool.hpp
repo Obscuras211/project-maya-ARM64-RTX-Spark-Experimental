@@ -23,10 +23,19 @@
 namespace maya::ds4 {
 
 inline void cpu_relax() {
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    // (the x86 test names the architecture, not the compiler: MSVC on Windows on arm64 defines _MSC_VER too, and
+    //  its <intrin.h> has no _mm_pause there)
     _mm_pause();
 #elif defined(__x86_64__) || defined(_M_X64)
     __builtin_ia32_pause();
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    //  (this header reaches both clang-cl and the cl.exe that hosts nvcc, so both spellings of the ARM hint)
+#if defined(_MSC_VER)
+    __yield();
+#else
+    __asm__ __volatile__("yield" ::: "memory");
+#endif
 #elif defined(__powerpc64__) || defined(__ppc64__) || defined(__PPC64__)
     __asm__ __volatile__("or 27,27,27" ::: "memory");   // POWER9: the low-priority spin hint
 #endif

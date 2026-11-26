@@ -7,7 +7,13 @@
 #include "ik2_off.cuh"
 #include "maya/kernels/cpu/pool.hpp"
 
-#include <immintrin.h>
+#include "maya/platform/cpu_relax.hpp"   // (the spin hint, per architecture: _mm_pause on x86, yield on aarch64)
+
+#if defined(__x86_64__) || defined(_M_X64)
+// (Windows on arm64 builds this with clang-cl, whose <immintrin.h> refuses ARM: there the lane runs ik2_exact.h's
+//  reference rows - detect() says scalar - and only the vector forms below are left out)
+#include <immintrin.h>   // (x86: the AVX-512 / AVX2 rows further down, taken only where detect() finds them)
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -15,7 +21,8 @@
 #include <cstdlib>
 #include <cstring>
 
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+// (the x86 `__cpuid` detect() uses: clang-cl on Windows on ARM defines _MSC_VER too, and its <intrin.h> has no __cpuid)
 #include <intrin.h>
 #endif
 
@@ -33,7 +40,8 @@ namespace {
 // ---- the CPU's forms
 enum Form { kScalar = 0, kAvx2 = 1, kAvx512 = 2 };
 int detect() {
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    // (clang-cl on Windows on ARM: _MSC_VER, but no __cpuid and no x86 form - the reference rows below)
     int r[4];
     __cpuid(r, 0);
     const int max_leaf = r[0];
@@ -64,6 +72,7 @@ int form() {
     return g_form;
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
 // ---- the 16-lane sums (ik2_exact.h's tree16)
 IK2L_T256 float tree256(__m256 lo, __m256 hi) {   // lanes 0-7 and 8-15
     const __m256 t8 = _mm256_add_ps(lo, hi);
@@ -197,6 +206,9 @@ IK2L_T256 void q8_256(const uint8_t* W, int K, int r0, int r1, const float* x, f
     }
 }
 
+#endif  // x86-64's vectorized rows
+
+// the reference: ik2_exact.h's own row_dot, the same bits as the vector forms (they are only faster)
 void rows_scalar(int ty, const uint8_t* W, int K, int r0, int r1, const float* x, float* out) {
     const size_t rb = x::row_bytes(ty, K);
     for (int r = r0; r < r1; ++r) out[r - r0] = x::row_dot(ty, W + (size_t) r * rb, K, x);
@@ -206,8 +218,10 @@ void rows_scalar(int ty, const uint8_t* W, int K, int r0, int r1, const float* x
 
 void rows(int ty, const uint8_t* W, int K, int r0, int r1, const float* x, float* out) {
     const int f = form();
+#if defined(__x86_64__) || defined(_M_X64)
     if (f == kAvx512) return ty == x::kNVFP4 ? nvfp4_512(W, K, r0, r1, x, out) : q8_512(W, K, r0, r1, x, out);
     if (f == kAvx2) return ty == x::kNVFP4 ? nvfp4_256(W, K, r0, r1, x, out) : q8_256(W, K, r0, r1, x, out);
+#endif
     rows_scalar(ty, W, K, r0, r1, x, out);
 }
 const char* rows_form() {
@@ -324,7 +338,7 @@ void Server::loop() {
         //  then nap, longer once idle for a second)
         const double idle = std::chrono::duration<double>(std::chrono::steady_clock::now() - idle_since).count();
         if (idle < 0.02) {
-            _mm_pause();
+            maya_cpu_pause();
         } else {
             std::this_thread::sleep_for(std::chrono::microseconds(idle < 1.0 ? 50 : 500));
         }
