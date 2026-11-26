@@ -35,6 +35,30 @@ class Pieces(unittest.TestCase):
         self.assertIsNone(U.vtuple("--upload-pack=x"))                  # never handed to git
         self.assertIsNone(U.vtuple(None))
 
+    def test_a_fork_build_of_a_version_is_still_that_version(self):
+        self.assertEqual(U.vtuple("v1.1.81-arm64"), (1, 1, 81))       # the suffix is not part of the ordering
+        self.assertEqual(U.build_of("v1.1.81-arm64"), "-arm64")
+        self.assertEqual(U.build_of("v1.1.81"), "")
+        self.assertGreater(U.vtuple("v1.1.81"), U.vtuple("v1.1.74-arm64"))
+        self.assertIsNone(U.vtuple("--upload-pack=x"))                # still not a version, still never handed to git
+        self.assertIsNone(U.vtuple("v1.1.81; rm -rf"))
+
+    def test_a_build_is_not_newer_than_the_version_it_builds(self):
+        u = U.Updater("1.1.81")                                       # this folder already runs the ARM build
+        u.latest = {"version": "1.1.81-arm64", "tag": "v1.1.81-arm64"}
+        self.assertFalse(u.newer())                                   # so: no nagging, and no update to take
+
+    def test_upstream_ahead_of_the_build_is_news_not_an_update(self):
+        u = U.Updater("1.1.81")
+        u.latest = {"version": "1.1.81-arm64", "tag": "v1.1.81-arm64", "repo": "someone/project-maya"}
+        u.upstream = {"version": "1.1.83", "tag": "v1.1.83", "url": "https://github.com/mw00/project-maya"}
+        info = u.info()
+        self.assertFalse(info["newer"])                               # the page offers nothing it can't install
+        self.assertEqual(info["waiting"]["version"], "1.1.83")        # ... and says why
+        self.assertIn("v1.1.81-arm64", info["by_hand"])               # the by-hand step names the build's own tag
+        u.upstream = None
+        self.assertIsNone(u.info()["waiting"])                        # no upstream news asked for: nothing to say
+
     def test_summary_is_the_first_sentence(self):
         notes = "**Maya-L is out: the closest to FP8.**\nUpdate: `git pull`\n\n## What's new\n- a"
         self.assertEqual(U.summary(notes), "Maya-L is out: the closest to FP8.")
@@ -82,6 +106,7 @@ class Updating(unittest.TestCase):
         sh(src, "commit", "-am", "1.0.1")
         sh(src, "tag", "-a", "v1.0.1", "-m", "v1.0.1")
         self.clone = self.tmp / "clone"
+        self.src = src
         self.u = U.Updater("1.0.0", root=self.clone)
         self.u.latest = {"version": "1.0.1", "tag": "v1.0.1", "url": None, "summary": ""}
         self.env = mock.patch.dict(os.environ, {U.SUPERVISED: "1"})
@@ -109,6 +134,16 @@ class Updating(unittest.TestCase):
         svc, ex = self.run_update()
         self.assertEqual((self.clone / "VERSION").read_text().strip(), "1.0.1")
         svc.close_for_restart.assert_called_once()
+        ex.assert_called_once_with(U.UPDATE_EXIT)
+
+    def test_a_build_tag_fast_forwards_like_the_release_it_builds(self):
+        sh(self.src, "tag", "-a", "v1.0.1-arm64", "-m", "the same release, built for one platform")
+        self.u.latest = {"version": "1.0.1-arm64", "tag": "v1.0.1-arm64", "url": None, "summary": ""}
+        info = self.u.info()
+        self.assertTrue(info["can_update"], info["blocker"])
+        self.assertIn("v1.0.1-arm64", info["by_hand"])
+        svc, ex = self.run_update()
+        self.assertEqual((self.clone / "VERSION").read_text().strip(), "1.0.1")
         ex.assert_called_once_with(U.UPDATE_EXIT)
 
     def test_local_changes_block_it(self):

@@ -15,7 +15,7 @@ A config's settings, as the page shows them (None: the engine's own default, or 
              prefill_chunk, cpu_threads, kv ("auto" | "q8": the latent cache's rows, --kv - 8-bit rows are the setup's
              opt-in faster drafting on a small card, "f16" kept where a config has it); images (the pack's mmproj
              file: --vision off when off); one answer at a time
-  Inkling-2-Mini (maya-ik2, an experimental preview - it stops at a flag it does not know, only its own are written):
+  Inkling-2-Mini (maya-ik2, it stops at a flag it does not know, only its own are written):
              kv ("fp8" | "f16": IK2_KV); one GPU, one answer at a time, text only, no drafting offered for now; whether
              a context keeps every expert in VRAM: tools/ik2_fit.py, the setup's
 apply() writes them back into the config's "args", "env", "gpu" and "vision" - its other keys as they are."""
@@ -87,7 +87,7 @@ HY4_NOT_YET = {"parallel": "Answers at once: Hy4-Flash answers one request at a 
                "kv_cache": "KV cache: Hy4-Flash's cache rows are auto or 8-bit (its setting kv)",
                "kv_streaming": "KV streaming: Hy4-Flash's engine turns it on by itself where the context needs it",
                "kv_resident": "KV streaming: Hy4-Flash's engine turns it on by itself where the context needs it"}
-# Inkling-2-Mini (maya-ik2, an experimental preview): its settings, and what its engine does not have yet - said in
+# Inkling-2-Mini (maya-ik2): its settings, and what its engine does not have yet - said in
 # plain words when a client asks for it (each one's "off": IK2_OFF)
 import ik2_fit as IK2F  # noqa: E402  (tools/) what fits on its card: the setup's own figures
 IK2_KEYS = ("context", "images", "gpus", "env", "kv", "draft", "parallel")
@@ -182,13 +182,24 @@ def ik2_vram_gb(cfg: dict) -> float:
     got = (cfg.get("installer") or {}).get("ik2_vram_gb")
     if not hip and sys.platform == "win32" and isinstance(got, (int, float)) and got > 0:
         return min(vram, float(got)) if vram else float(got)   # (Windows: as CUDA gets the card, the setup measured)
-    if hip and card and card.get("arch") == "gfx1151" and hasattr(os, "sysconf"):
+    if ik2_apu(cfg, card) and hasattr(os, "sysconf"):
         try:
             ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
         except (ValueError, OSError):
             return vram
         vram = max(vram, ram) - max(8.0, 0.1 * ram)
     return vram
+
+
+def ik2_apu(cfg: dict, card: dict | None = None) -> bool:
+    """Whether an Inkling 2 config runs on an AMD APU whose memory is the RAM (a Ryzen AI Max, gfx1151): every expert
+    stays in its memory there (no offload path); a discrete AMD card plans as an NVIDIA one."""
+    if cfg.get("backend") != "hip":
+        return False
+    if card is None:
+        ids = gpus_of(cfg) or [0]
+        card = next((g for g in machine_gpus("hip") if g.get("index") == ids[0]), None)
+    return bool(card and card.get("arch") == "gfx1151")
 
 
 # ------------------------------------------------------------------ the context a model was trained for
@@ -356,9 +367,10 @@ def mm3_pack_has(cfg: dict, key: str) -> bool:
 
 # ------------------------------------------------------------------ refusal ablation (an optional direction file)
 # The engines that project a direction out per request (GEN ablate=1; loaded with --ablate FILE --ablate-default off):
-# maya-ds4, maya-mm3 and the `maya` engine's GLM models (GLM-5.3-Flash, GLM-5.3; not on the Mac engine).  Qwen
+# maya-ds4, maya-mm3, maya-ik2 (Inkling-2-Mini) and the `maya` engine's GLM models (GLM-5.3-Flash, GLM-5.3; not on the Mac
+# engine).  Qwen
 # (CYBER-FROST) has none; without a direction file the dashboard shows no switch.
-ABLATE_FAMILIES = ("deepseek", "minimax", "glm")
+ABLATE_FAMILIES = ("deepseek", "minimax", "glm", "ik2")
 # a model repo's direction file (phase 2: fitted and shipped by us): <Model>-refusal-direction.gguf - a control vector
 # GGUF (general.architecture "controlvector", direction.1 F32 [n_embd]) with maya.ablate.scale / .fit_layer / .model
 # / .fitted_on / .version metadata; the setup downloads it with the model and records it as cfg["ablate"]["file"]
@@ -433,7 +445,8 @@ def _choices(cfg: dict) -> dict:
         card = next((g for g in machine_gpus("cuda") if g.get("index") == (gpus_of(cfg) or [0])[0]), None)             if cfg.get("backend") != "hip" else None
         off = IK2F.drafting_off_reason((card or {}).get("arch"), ik2_vram_gb(cfg), ctx or IK2F.CONTEXTS[0],
                                        (cfg.get("env") or {}).get("IK2_KV") or IK2F.DEFAULT_KV,
-                                       cfg.get("backend") == "hip")
+                                       cfg.get("backend") == "hip", ik2_apu(cfg),
+                                       len(gpus_of(cfg) or []) == 2)   # (two cards: the split drafts, measured)
         return {"draft": ["none"] if off else
                 ["auto"] + (["dspark"] if flag(cfg.get("args") or [], "--draft") else []) + ["none"],
                 "images": bool(cfg.get("vision") or cfg.get("vision_off")), "kv": list(IK2F.KV_BYTES)}
@@ -581,7 +594,7 @@ def apply(cfg: dict, settings: dict) -> dict:
         if not_yet:
             raise ValueError(HY4_NOT_YET[not_yet[0]])
         known += tuple(HY4_NOT_YET)
-    if fam == "ik2":                                   # (Inkling-2-Mini's preview: what it does not have yet, said)
+    if fam == "ik2":                                   # (Inkling-2-Mini: what it does not support yet, said)
         not_yet = sorted(k for k in set(settings) & set(IK2_NOT_YET)
                          if settings[k] not in (None, "") and settings[k] != IK2_OFF.get(k))
         if not_yet:
@@ -1012,7 +1025,7 @@ def describe(path: Path, running: str | None) -> dict:
         #  page says where the engine would run its slower path)
         vram = ik2_vram_gb(cfg)
         ctxs = sorted({*IK2F.CONTEXTS, int(cur.get("context") or 0)} - {0})
-        own.update(ik2_fit={kv: {str(c): {k: v for k, v in IK2F.plan(vram, c, kv, (cfg.get("backend") or "cuda") == "hip").items() if k != "need_gib"}
+        own.update(ik2_fit={kv: {str(c): {k: v for k, v in IK2F.plan(vram, c, kv, ik2_apu(cfg)).items() if k != "need_gib"}
                                  for c in ctxs} for kv in IK2F.KV_BYTES} if vram else None,
                    ik2_kv_bytes=IK2F.KV_BYTES)
     return {**own, "file": path.name, "path": str(path), "model": cfg.get("model_name") or "", "family": family(cfg),

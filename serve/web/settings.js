@@ -46,7 +46,7 @@ const Row = ({label, sub, children, htmlFor, cls = ""}) => html`<div class=${`se
 
 // the engines by their INFO engine_kind
 const ENGINES = {"glm-fast": "GLM fast path", ds4: "DeepSeek-V4.1 (maya-ds4)", mm3: "MiniMax-M3.1 (maya-mm3)",
-                 hy4: "Hy4-Flash (maya-hy4)", ik2: "Inkling 2 (maya-ik2, an experimental preview)"};
+                 hy4: "Hy4-Flash (maya-hy4)", ik2: "Inkling 2 (maya-ik2)"};
 
 // ------------------------------------------------------------------ General
 function General() {
@@ -399,6 +399,8 @@ function UpdateCard() {
     tone = "accent"; icon = "download";
     title = `Project Maya v${latest.version} is out`;
     text = latest.summary || "";
+    // a fork's build of a release says which platform it was built for, so the version alone doesn't read as a surprise
+    if (latest.build) text = `The ${latest.build.slice(1)} build of v${latest.version}: ${text}`;
     if (!u.can_update) how = `Update by hand: ${u.by_hand}. This page can't, because ${u.blocker}.`;
     acts = html`${notes}${u.can_update ? html`<button type="button" class="btn btn--primary btn--sm" onClick=${startUpdate}>Update to v${latest.version}</button>` : null}`;
   } else if (u.error) {
@@ -409,7 +411,9 @@ function UpdateCard() {
   } else if (u.latest) {
     tone = "ok"; icon = "check";
     title = "Up to date";
-    text = `v${u.current} is the latest release. Checked on GitHub${when ? ` at ${when}` : ""}.`;
+    text = u.waiting ? `v${u.current} is the newest release here. Upstream reached v${u.waiting.version}: the build for
+      this PC is made every few releases, not at every upstream one.`
+      : `v${u.current} is the latest release. Checked on GitHub${when ? ` at ${when}` : ""}.`;
     acts = again("Check again");
   } else {
     title = "Checking for updates…";

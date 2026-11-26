@@ -158,8 +158,64 @@ measures for itself (`data/hy4-drafting.txt`, `data/ik2-drafting.txt`, the `*-id
 3. Two failure signatures to recognise instantly: an empty model list or "no NVIDIA GPU found" is the `nvidia-smi`
    NPU probe (`python -c "import setup as S; print(S.gpus())"` should print one row with a numeric `arch`); an
    executable that vanishes with `-1073741515` is a missing DLL (`dumpbin /dependents`).
-4. To move the port onto a newer upstream release: `git switch -c arm64-on-1177 v1.1.77` then
-   `git cherry-pick windows-arm64`, rebuild, and re-run the audit above.
+4. To move the port onto a newer upstream release: branch from the new tag and port by hand.  A `cherry-pick`
+   applies five of the eight files *cleanly* and the build then dies, because v1.1.81 renamed `include/strata`
+   to `include/maya` and `STRATA_*` to `MAYA_*` - section 0 of ARM64-changes.md is that audit, and the port of
+   1.1.74 to 1.1.81 is what it was written from.  Rebuild, then re-run the audit above.
 5. Hardware ceilings measured here, for calibration: 30.4 GB of system RAM, 185 GB of free disk, one GPU with no
    second device worth counting.  Families that need more than that are out of reach for reasons that have nothing to
    do with ARM.
+
+## A second account, and the one failure that was not in the code
+
+The port was proven on one laptop.  Then a second Windows account on the *same* machine - a fresh profile, a
+fresh clone of the fork, the same Visual Studio, the same CUDA - failed the build with about four hundred lines
+of
+
+    immintrin.h(14,2): error: "This header is only meant to be used on x86 and x64 architecture"
+
+in `expert.cpp`, `q2_avx512.cpp`, `iq_avx512.cpp`, `kq_avx512.cpp` and `iq_avx2.cpp`, plus
+`use of undeclared identifier 'kGemmK'` in `exl3_cpu.cpp`.  Every one of those files is something an ARM build
+never compiles.  Nothing in the repo differed between the two accounts.
+
+**Wrong turns.**  The errors name intrinsics and CUDA-adjacent files, so it reads as a missing Visual Studio
+component or a CUDA install problem.  Neither: the identical machine built the whole thing in the first
+account.  An ARM64 Windows runs an x64 program fine, so nothing looks wrong on the surface either - and the
+setup's own PC check passes, because it checks GPUs, RAM and Visual Studio, not the bitness of its own
+interpreter.
+
+**What it was.**  CMake decides the CPU family from the architecture of *cmake.exe itself*, and Maya's setup
+installs CMake with pip into `.venv` - so the tools inherit the bitness of the Python that installed them.
+The second account had an **x64 Python 3.12**, which Windows on ARM runs under emulation:
+
+    x64 Python  ->  x64 cmake.exe  ->  CMAKE_SYSTEM_PROCESSOR: AMD64  ->  GGML_SYSTEM_ARCH: x86
+                ->  ggml adds its AVX-512 and AVX2 kernel files  ->  ARM clang-cl cannot compile them
+
+Setting `PROCESSOR_ARCHITECTURE=ARM64` in the environment does **not** help: tested with CMake 4.4.5, it
+reports ARM64 from the variable and still picks x86, because its own binary is x64.
+
+**Read these two lines first in any build log of this repo** - they answer the question before the errors
+start:
+
+    -- CMAKE_SYSTEM_PROCESSOR: ARM64
+    -- GGML_SYSTEM_ARCH: ARM
+
+`x86` in the second line on an ARM PC means the tooling is the wrong bitness, and no change to the source will
+fix it.
+
+**The fix**, which is what the second account did: install Python's ARM64 build (3.12 or newer; python.org's
+downloads list it as "Windows installer (ARM64)"), delete `.venv` **and** `build`, make the environment again
+with the ARM64 interpreter, and check before configuring:
+
+    py -3.14-arm64 -m venv .venv
+    .venv\Scripts\python.exe -c "import platform; print(platform.machine())"      -> ARM64
+
+`build` has to go with it: the `CMakeFiles` cache holds the x86 decision, and a reconfigure keeps it.
+
+**What is in the code now because of it.**  Step 1 asks the question that account had to guess at, before it
+asks anything else or downloads a byte.  `setup.x64_on_arm64()` reads the PE header of the interpreter running
+the setup - emulation hides every softer answer, and `platform.machine()` answers `ARM64` even to an x64
+process, which is why upstream's own `ARM` flag is `True` in the broken case too - and step 1 stops with the
+error line, the reason and the command that undoes it.  `IsWow64Process2` is the call that tells the truth: it
+names both the process's machine and the host's.
+
