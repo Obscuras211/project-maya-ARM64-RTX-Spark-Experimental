@@ -21,12 +21,12 @@ RESTART_EXIT = 76                   # ... the dashboard saved a new port: start 
 SUPERVISED = "MAYA_RESTART_ON_UPDATE"   # set by maya.py for the server it starts: it starts it again after an update
 CHECK_EVERY = 6 * 3600
 RETRY_AFTER = 10 * 60               # GitHub not reached: ask again after this
-TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(-[a-z][a-z0-9.]*)?$")   # a fork's own build of a release: v1.1.81-arm64
 
 
 def vtuple(v):
     m = TAG.match(str(v or "").strip())
-    return tuple(int(x) for x in m.groups()) if m else None
+    return tuple(int(x) for x in m.groups()[:3]) if m else None    # the build's suffix is not part of the ordering
 
 
 def git(root, *args, timeout=60):
