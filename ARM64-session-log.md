@@ -219,3 +219,52 @@ process, which is why upstream's own `ARM` flag is `True` in the broken case too
 error line, the reason and the command that undoes it.  `IsWow64Process2` is the call that tells the truth: it
 names both the process's machine and the host's.
 
+
+## The Update button, and why it could not point at us
+
+About > Updates had nagged for months about releases this PC cannot run, and the install's own log had the reason in
+a line that meant nothing until it was read next to the code:
+
+    [maya] the update did not happen: git fetch failed: ... and the repository exists.
+
+`serve/update.py` asks GitHub for the latest release of *the repository git calls `origin`*. This folder has no
+`origin` - the remotes are named `fork` and `upstream` - so the code fell back to its hard-coded
+`mw00/project-maya`: every check described a build that cannot compile here, and the click then died at the fetch
+before any of that could matter. `git remote add origin https://github.com/Obscuras211/project-maya.git` is the
+whole of that half of the fix, and it is worth checking on any folder that misbehaves: `git remote get-url origin`.
+
+Two quieter blockers were waiting behind it, both about a tag carrying a suffix:
+
+* `TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")` - to that pattern `v1.1.81-arm64` is not a version at all, and the
+  page answered "the latest release's tag is not a version". The regex now takes an optional suffix and `vtuple`
+  reads only the three numbers, which keeps the ordering honest: a build of 1.1.81 is never offered as "newer" to a
+  folder already running 1.1.81, so between ports the page stays quiet instead of nagging.
+* The update itself is `git merge --ff-only refs/tags/<tag>`, which moves only a folder standing *behind* the tag on
+  the same line of history. A port branch cut fresh from upstream `v1.1.81` is not behind the previous ARM release,
+  it is a different line, so the button would have found a dead end even with a perfectly readable tag.
+
+So the release is a merge commit, built after the build was verified, out of the tree that was compiled and run:
+
+    $tree = git rev-parse windows-arm64-1181^{tree}    # the tested tree, engines and all
+    $p1   = git rev-parse windows-arm64                # where a v1.1.74-arm64 install stands
+    $p2   = git rev-parse windows-arm64-1181           # the port, on top of upstream v1.1.81
+    git commit-tree $tree -p $p1 -p $p2 -m "Upstream v1.1.81, ported to Windows on ARM64"
+
+and the proof is short because the button is short: clone the folder, stand at the old release, run the page's two
+commands - `git fetch --tags origin`, `git merge --ff-only refs/tags/v1.1.81-arm64` - in the throwaway copy. It
+fast-forwards, the tree equals the built one, `VERSION` reads 1.1.81 and `git status` is clean. A Windows trap while
+checking any of this: `git merge-base --is-ancestor` is silent and answers through its exit code, so
+`if (git merge-base --is-ancestor A B)` in PowerShell is *always* false - read `$LASTEXITCODE`.
+
+The ported build did run, too: Inkling 2 Mini, 4,388 tokens in 66 s (76 tok/s) at 32K context, against 45 tok/s at
+262K on the v1.1.74 build. Those two numbers are the context sizes talking, not the port; a fair comparison sets
+both the same.
+
+One small thing that looked like a build failure and was not: deleting `.venv` from a folder that already has
+`build/` and `build-vision/` leaves those caches pointing at a cmake and ninja that no longer exist, and the next
+configure dies in two seconds with
+
+    CMake Error: CMake was unable to find a build program corresponding to "Ninja".  CMAKE_MAKE_PROGRAM is not set.
+
+Maya sees it, clears the cache and builds the whole thing, so the run goes on and finishes - but "delete `.venv` and
+try again" always means deleting the build folders with it.
