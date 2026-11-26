@@ -4,7 +4,11 @@ The check asks GitHub for the latest release of the repository this folder was c
 mw00/project-maya) - only when the dashboard asks, at most every six hours (MAYA_UPDATE_CHECK=0 turns it off).
 Updating fast-forwards the git checkout to that release's tag, then the server ends with UPDATE_EXIT: maya.sh /
 START-MAYA.bat (maya.py) start Maya again, which compiles what changed in the engine and loads the model.  A folder
-that can't do that (no git, local changes, a server started some other way) gets the reason and the steps by hand."""
+that can't do that (no git, local changes, a server started some other way) gets the reason and the steps by hand.
+
+A fork of Maya releases its own builds of one upstream version, tagged with a suffix (v1.1.81-arm64: Windows on ARM,
+which upstream does not build for).  The version still decides what is newer and the tag is still what the folder
+fast-forwards to; upstream's own newest release is reported beside it, as news, for the wait between builds."""
 import json
 import os
 import re
@@ -21,12 +25,20 @@ RESTART_EXIT = 76                   # ... the dashboard saved a new port: start 
 SUPERVISED = "MAYA_RESTART_ON_UPDATE"   # set by maya.py for the server it starts: it starts it again after an update
 CHECK_EVERY = 6 * 3600
 RETRY_AFTER = 10 * 60               # GitHub not reached: ask again after this
-TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(-[a-z][a-z0-9.]*)?$")   # a fork's own build of a release: v1.1.81-arm64
 
 
 def vtuple(v):
     m = TAG.match(str(v or "").strip())
-    return tuple(int(x) for x in m.groups()) if m else None
+    return tuple(int(x) for x in m.groups()[:3]) if m else None    # the build's suffix is not part of the ordering
+
+
+def build_of(tag):
+    """A release tag's build suffix ("" for a plain release): v1.1.81-arm64 -> "-arm64".  A fork of Maya tags its own
+    releases this way because they are one upstream version built for a platform upstream does not build for; the
+    version still decides what is newer, and the suffix only says which build of it this is."""
+    m = TAG.match(str(tag or "").strip())
+    return (m.group(4) or "") if m else ""
 
 
 def git(root, *args, timeout=60):
@@ -63,7 +75,8 @@ class Updater:
         self.current = current
         self.root = Path(root)
         self.lock = threading.Lock()       # one check or one update at a time
-        self.latest = None                 # {"version", "url", "summary", "published"}
+        self.latest = None                 # {"version", "tag", "url", "summary", "published", "repo", "build"}
+        self.upstream = None               # upstream's own latest release, when this folder updates from a fork
         self.checked = 0.0
         self.next_check = 0.0
         self.error = None
@@ -81,20 +94,34 @@ class Updater:
                     self._fetch_latest()
         return self.info()
 
-    def _fetch_latest(self):
-        repo = origin_repo(self.root) if (self.root / ".git").exists() else REPO
+    def _release(self, repo: str) -> dict:
+        """One repository's latest release, as the page wants it (raises when GitHub is not reached or the tag is not a
+        version, which is what the six-hour pause is for)."""
         req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/latest",
                                      headers={"Accept": "application/vnd.github+json",
                                               "User-Agent": f"project-maya/{self.current or '?'}"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            rel = json.loads(r.read().decode("utf-8"))
+        tag = str(rel.get("tag_name") or "")
+        if not vtuple(tag):
+            raise ValueError(f"the latest release's tag is not a version ({tag[:40]!r})")
+        return {"version": tag.lstrip("v"), "tag": tag, "url": rel.get("html_url"),
+                "summary": summary(rel.get("body") or ""), "published": rel.get("published_at"),
+                "repo": repo, "build": build_of(tag)}
+
+    def _fetch_latest(self):
+        repo = origin_repo(self.root) if (self.root / ".git").exists() else REPO
         try:
-            with urllib.request.urlopen(req, timeout=8) as r:
-                rel = json.loads(r.read().decode("utf-8"))
-            tag = str(rel.get("tag_name") or "")
-            if not vtuple(tag):
-                raise ValueError(f"the latest release's tag is not a version ({tag[:40]!r})")
-            self.latest = {"version": tag.lstrip("v"), "tag": tag, "url": rel.get("html_url"),
-                           "summary": summary(rel.get("body") or ""), "published": rel.get("published_at"),
-                           "repo": repo}
+            self.latest = self._release(repo)
+            # A fork's releases are its own builds of one upstream version, so upstream's newest release is a second
+            # piece of news the page can use: "upstream reached 1.1.83, the build for this PC is not made from it yet"
+            # rather than silence.  It is a nicety: failing to ask for it does not fail the check.
+            self.upstream = None
+            if repo != REPO:
+                try:
+                    self.upstream = self._release(REPO)
+                except (OSError, ValueError):
+                    pass
             self.error = None
             self.checked = time.time()
             self.next_check = self.checked + CHECK_EVERY
@@ -123,15 +150,26 @@ class Updater:
             return "files in this folder were changed by hand (git status lists them)"
         return None
 
+    def waiting(self) -> dict | None:
+        """Upstream's newest release when it is newer than the release this folder updates from: a fork builds its
+        platforms every few releases, and the page says so instead of calling the older build simply up to date."""
+        up, new = self.upstream, self.latest
+        cu, cn = vtuple((up or {}).get("version")), vtuple((new or {}).get("version"))
+        return {"version": up["version"], "url": up.get("url")} if up and cu and cn and cu > cn else None
+
     def info(self) -> dict:
         newer = self.newer()
         why = self.blocker() if newer else None
         state = dict(self.state) if self.state else None
+        tag = str((self.latest or {}).get("tag") or "")
+        by_hand = ("download the new release from GitHub into a new folder" if not (self.root / ".git").exists()
+                   else (f"git fetch --tags && git merge --ff-only refs/tags/{tag}, then start Maya again (./setup.sh or "
+                         "START-MAYA.bat)" if build_of(tag)      # a build's tag is not what a plain git pull brings in
+                         else "git pull, then start Maya again (./setup.sh or START-MAYA.bat)"))
         return {"current": self.current, "enabled": self.enabled(), "latest": self.latest, "newer": newer,
                 "checked": self.checked or None, "error": self.error, "can_update": newer and why is None,
-                "blocker": why, "state": state,
-                "by_hand": ("git pull, then start Maya again (./setup.sh or START-MAYA.bat)" if (self.root / ".git").exists()
-                            else "download the new release from GitHub into a new folder")}
+                "blocker": why, "state": state, "upstream": self.upstream, "waiting": self.waiting() if not newer else None,
+                "by_hand": by_hand}
 
     def busy(self) -> bool:
         return bool(self.state) and self.state.get("state") == "updating"

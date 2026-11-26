@@ -45,7 +45,9 @@ refer to names v1.1.81 deleted:
 | `STRATA_CPU_ARM64`, `STRATA_X86` | `MAYA_CPU_ARM64`, `MAYA_X86` |
 | `strata_cpu_pause()` | `maya_cpu_pause()` |
 
-After that the port is the same eight files as before, nothing added to them and nothing dropped.
+After that the port is the same eight files as before, nothing added to them and nothing dropped.  The only files
+this branch adds are three the old one never had - `serve/update.py`, `serve/test_update.py` and
+`serve/web/settings.js` - and those are about *updating* a running install, not about building it.
 
 **New here: step 1 checks the Python's own architecture.**  An x64 Python running under emulation makes pip
 install an x64 CMake into `.venv`, CMake decides the CPU family from its own bitness, and the build is then
@@ -54,6 +56,26 @@ told this is an x86 machine - a hundred files of `immintrin.h` errors, none of w
 answer: `platform.machine()` reports `ARM64` even to an x64 process, so upstream's `ARM` flag is `True` in the
 broken case too) and step 1 stops with the error line and the fix *before* it asks a question or downloads a
 byte.  The last section of [ARM64-session-log.md](ARM64-session-log.md) is how that was found.
+
+**The updater knows a fork's build is a build.**  `serve/update.py` could not read a tag like `v1.1.81-arm64` at
+all - its version regex is `^v?(\d+)\.(\d+)\.(\d+)$` - so About > Updates answered "the latest release's tag is not
+a version" and a folder on a build had no way forward from the page.  It now parses the suffix, orders releases by
+version alone (a build of 1.1.81 is never offered to a folder already running 1.1.81, so it cannot nag),
+fast-forwards to the build's own tag, and names that tag in the steps it hands you when it can't act itself.  A
+folder that updates from a fork also asks upstream, and while upstream is ahead of the newest build the page says
+so instead of calling the older build up to date in silence.  `serve/test_update.py` covers all of it, including a
+suffixed tag moving a real clone.
+
+**A release on this branch is a merge commit, and that is what keeps the Update button alive.**  The updater moves a
+folder with `git merge --ff-only refs/tags/<tag>`, which works only when that tag sits *ahead* of where the folder
+stands.  So `v1.1.81-arm64` has two parents - the tip of the ARM branch, `v1.1.74-arm64` and everything after it,
+and the port on top of upstream `v1.1.81` - with a tree equal to the one built and tested here.  A tidy branch cut
+fresh from upstream would have been a dead end for anyone updating from the previous release.  Every later re-port
+does the same, in this order: port on top of the new upstream tag and verify the build, then
+`git commit-tree <that tree> -p <branch tip> -p <the port>`, then tag the merge.  What must never happen is a
+release that is not a descendant of the release before it.  For the same reason one line went *back* to the
+`windows-arm64` branch: `v1.1.74-arm64`'s updater could not read a suffixed tag either, so it could not have
+offered this release from its own page.
 
 ## 1. The PC this was built and measured on
 
